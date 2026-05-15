@@ -22,20 +22,47 @@ class LLMError(Exception):
 class GroqClient:
     """
     Thin wrapper around the Groq Python SDK.
-    Uses JSON mode to force structured output from the model.
+    Automatically rotates through fallback API keys when a rate-limit
+    (429) or quota error is hit on the primary key.
     """
 
-    def __init__(self, api_key: str, model: str):
-        if not api_key:
+    def __init__(self, api_keys: List[str], model: str):
+        if not api_keys:
             raise LLMError(
-                "GROQ_API_KEY is not set. Please copy .env.example to .env and add your key."
+                "No GROQ_API_KEY configured. Please add it to your .env file."
             )
         try:
-            from groq import Groq
-            self._client = Groq(api_key=api_key)
+            from groq import Groq as _Groq
+            self._Groq = _Groq
         except ImportError:
             raise LLMError("groq package is not installed. Run: pip install groq")
+        self._api_keys = api_keys
         self.model = model
+
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(kw in msg for kw in ("429", "rate limit", "rate_limit", "quota", "ratelimit"))
+
+    def _call_with_rotation(self, make_call):
+        """
+        Try each API key in order. Move to the next one on rate-limit errors.
+        Raises LLMError if all keys are exhausted.
+        """
+        last_exc = None
+        for i, key in enumerate(self._api_keys):
+            client = self._Groq(api_key=key)
+            try:
+                return make_call(client)
+            except Exception as e:
+                if self._is_rate_limit_error(e):
+                    label = "primary" if i == 0 else f"fallback {i}"
+                    logger.warning(f"Rate limit hit on {label} key, trying next key...")
+                    last_exc = e
+                    continue
+                raise LLMError(f"LLM call failed: {e}") from e
+        raise LLMError(
+            f"All {len(self._api_keys)} API key(s) hit rate limits. Try again later."
+        ) from last_exc
 
     def chat_json(
         self,
@@ -44,16 +71,13 @@ class GroqClient:
         temperature: float = 0.1,
         max_tokens: int = 4096,
     ) -> Dict[str, Any]:
-        """
-        Call the model and force a JSON object response.
-        Returns the parsed dict. Raises LLMError on failure.
-        """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
-        try:
-            response = self._client.chat.completions.create(
+
+        def make_call(client):
+            response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 response_format={"type": "json_object"},
@@ -62,14 +86,13 @@ class GroqClient:
             )
             raw = response.choices[0].message.content
             if not raw or not raw.strip():
-                raise LLMError("LLM returned an empty response. Check your API key and model availability.")
-            return json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise LLMError(f"LLM returned invalid JSON: {e}")
-        except LLMError:
-            raise
-        except Exception as e:
-            raise LLMError(f"LLM call failed: {e}")
+                raise LLMError("LLM returned an empty response.")
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise LLMError(f"LLM returned invalid JSON: {e}") from e
+
+        return self._call_with_rotation(make_call)
 
     def chat_text(
         self,
@@ -78,24 +101,21 @@ class GroqClient:
         temperature: float = 0.3,
         max_tokens: int = 1024,
     ) -> str:
-        """
-        Call the model and return a plain text response.
-        Used for the Business Analyst Agent.
-        """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
-        try:
-            response = self._client.chat.completions.create(
+
+        def make_call(client):
+            response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
             return response.choices[0].message.content.strip()
-        except Exception as e:
-            raise LLMError(f"LLM call failed: {e}")
+
+        return self._call_with_rotation(make_call)
 
 
 class MockLLMClient:
@@ -180,15 +200,16 @@ class MockLLMClient:
         }
 
 
-def get_llm_client(role: str = "dashboard") -> GroqClient | MockLLMClient:
+def get_llm_client(role: str = "dashboard") -> "GroqClient | MockLLMClient":
     """
     Factory that returns the correct LLM client based on available config.
+    Passes all configured API keys so the client can rotate on rate limits.
 
     role: "dashboard" → Dashboard Generation Agent model
           "analyst"   → Business Analyst Agent model
     """
-    api_key = settings.GROQ_API_KEY
-    if not api_key:
+    api_keys = settings.api_keys
+    if not api_keys:
         return MockLLMClient()
 
     model = (
@@ -196,4 +217,4 @@ def get_llm_client(role: str = "dashboard") -> GroqClient | MockLLMClient:
         if role == "dashboard"
         else settings.ANALYST_AGENT_MODEL
     )
-    return GroqClient(api_key=api_key, model=model)
+    return GroqClient(api_keys=api_keys, model=model)
