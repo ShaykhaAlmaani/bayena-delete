@@ -124,6 +124,72 @@ def _build_methodology(
 
 
 # ---------------------------------------------------------------------------
+# Raw LLM output coercion — sanitizes before Pydantic validation
+# ---------------------------------------------------------------------------
+
+_CALCULATION_ALIASES = {
+    "percentage": "mean", "percent": "mean", "rate": "mean", "average": "mean",
+    "total": "sum", "count": "count_rows", "unique": "count_unique",
+    "latest": "latest_value", "last": "latest_value", "change": "pct_change",
+    "growth": "pct_change", "highest": "max", "lowest": "min", "top": "top_category_by_count",
+}
+_VALID_CALCULATIONS = {
+    "count_rows", "sum", "mean", "max", "min",
+    "top_category_by_count", "count_unique", "latest_value", "pct_change",
+}
+_CHART_TYPE_ALIASES = {
+    "histogram": "bar", "pie": "donut", "area": "line", "column": "bar",
+    "map": "bar", "table": "bar", "bubble": "scatter", "trend": "line",
+}
+_VALID_CHART_TYPES = {"line", "bar", "donut", "scatter", "heatmap"}
+_VALID_AGGREGATIONS = {"count", "sum", "mean", "max", "min"}
+
+
+def _coerce_raw_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sanitize the raw LLM JSON dict so it passes DashboardSpec validation.
+    Maps unknown enum values to valid ones and truncates overlong lists.
+    """
+    coerced = dict(raw)
+
+    # Truncate lists to allowed lengths
+    if isinstance(coerced.get("kpis"), list):
+        coerced["kpis"] = coerced["kpis"][:4]
+    if isinstance(coerced.get("charts"), list):
+        coerced["charts"] = coerced["charts"][:2]
+    if isinstance(coerced.get("insight_hints"), list):
+        coerced["insight_hints"] = coerced["insight_hints"][:4]
+
+    # Coerce KPI calculations
+    for kpi in coerced.get("kpis", []):
+        calc = str(kpi.get("calculation", "")).lower()
+        if calc not in _VALID_CALCULATIONS:
+            kpi["calculation"] = _CALCULATION_ALIASES.get(calc, "count_rows")
+            logger.warning(f"Coerced KPI calculation '{calc}' → '{kpi['calculation']}'")
+
+    # Coerce chart types and aggregations
+    for chart in coerced.get("charts", []):
+        ctype = str(chart.get("type", "")).lower()
+        if ctype not in _VALID_CHART_TYPES:
+            chart["type"] = _CHART_TYPE_ALIASES.get(ctype, "bar")
+            logger.warning(f"Coerced chart type '{ctype}' → '{chart['type']}'")
+        agg = str(chart.get("aggregation", "")).lower()
+        if agg not in _VALID_AGGREGATIONS:
+            chart["aggregation"] = "count" if chart.get("y", "count") == "count" else "sum"
+            logger.warning(f"Coerced aggregation '{agg}' → '{chart['aggregation']}'")
+
+    # Ensure required list fields exist
+    coerced.setdefault("assumptions", [])
+    coerced.setdefault("data_limitations", [])
+    coerced.setdefault("insight_hints", [
+        {"id": "ins_1", "type": "summary", "source_chart": None,
+         "description_hint": "Summarize the key findings from this dashboard."}
+    ])
+
+    return coerced
+
+
+# ---------------------------------------------------------------------------
 # Public pipeline functions
 # ---------------------------------------------------------------------------
 
@@ -163,7 +229,6 @@ def interpret_request(user_prompt: str) -> Dict[str, Any]:
 def generate_dashboard(
     user_prompt: str,
     selected_dataset_ids: List[str],
-    retry_on_invalid: bool = True,
 ) -> Dict[str, Any]:
     """
     Step 2: Generate a full dashboard from the selected datasets.
@@ -184,17 +249,14 @@ def generate_dashboard(
     # Get spec from LLM
     try:
         raw = client.chat_json(system_prompt, user_message, temperature=0.1)
-        spec = DashboardSpec(**raw)
-    except (LLMError, ValidationError, Exception) as e:
-        logger.error(f"LLM spec generation failed: {e}")
-        if retry_on_invalid:
-            logger.info("Falling back to mock spec.")
-            from app.llm.client import MockLLMClient
-            mock = MockLLMClient()
-            raw = mock.chat_json(system_prompt, user_message)
+        try:
             spec = DashboardSpec(**raw)
-        else:
-            raise
+        except (ValidationError, Exception) as ve:
+            logger.warning(f"DashboardSpec validation failed, attempting coercion: {ve}")
+            spec = DashboardSpec(**_coerce_raw_spec(raw))
+    except LLMError as e:
+        logger.error(f"LLM call failed: {e}")
+        raise
 
     # Override selected datasets with what user confirmed
     spec_dict = spec.model_dump()
@@ -301,11 +363,14 @@ def edit_dashboard(
 
     try:
         raw = client.chat_json(system_prompt, user_message, temperature=0.1)
-        spec = DashboardSpec(**raw)
-    except (LLMError, ValidationError, Exception) as e:
-        logger.error(f"Edit dashboard spec failed: {e}")
-        # Fall back to regenerating from scratch
-        return generate_dashboard(f"{user_prompt}. User edit: {edit_request}", selected_dataset_ids)
+        try:
+            spec = DashboardSpec(**raw)
+        except (ValidationError, Exception) as ve:
+            logger.warning(f"Edit spec validation failed, attempting coercion: {ve}")
+            spec = DashboardSpec(**_coerce_raw_spec(raw))
+    except LLMError as e:
+        logger.error(f"Edit dashboard LLM call failed: {e}")
+        raise
 
     spec_dict = spec.model_dump()
     spec_dict["selected_datasets"] = [d for d in selected_dataset_ids if d in CATALOG_BY_ID] or spec.selected_datasets
