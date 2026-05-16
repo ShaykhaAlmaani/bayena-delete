@@ -25,6 +25,8 @@ class KPIPlan(BaseModel):
     label_ar: Optional[str] = None
     calculation: ALLOWED_CALCULATIONS
     column: str
+    filter_column: Optional[str] = None  # e.g. "sector"
+    filter_value: Optional[str] = None   # e.g. "Residential"
     description: Optional[str] = None
 
 
@@ -51,11 +53,28 @@ class ChartSpec(BaseModel):
 # Insight Hint — guidance the LLM provides for generating a written insight
 # ---------------------------------------------------------------------------
 
+_INSIGHT_TYPE_MAP: Dict[str, str] = {
+    "trend": "trend", "comparison": "comparison", "anomaly": "anomaly",
+    "recommendation": "recommendation", "summary": "summary",
+    # common LLM aliases
+    "correlation": "comparison", "ranking": "comparison", "proportion": "comparison",
+    "breakdown": "comparison", "distribution": "summary", "overview": "summary",
+    "pattern": "trend", "forecast": "trend", "change": "trend",
+    "observation": "summary", "finding": "summary", "insight": "summary",
+    "highlight": "anomaly", "outlier": "anomaly", "spike": "anomaly",
+}
+
+
 class InsightHint(BaseModel):
     id: str
     type: Literal["trend", "comparison", "anomaly", "recommendation", "summary"]
     source_chart: Optional[str] = None
     description_hint: str
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def coerce_type(cls, v: str) -> str:
+        return _INSIGHT_TYPE_MAP.get(str(v).lower(), "summary")
 
 
 # ---------------------------------------------------------------------------

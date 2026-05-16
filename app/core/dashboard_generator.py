@@ -83,10 +83,14 @@ def _fix_spec_columns(spec: DashboardSpec, datasets: Dict[str, Any]) -> Dashboar
 
         for kpi in spec_dict["kpis"]:
             if kpi["column"] not in available:
-                # Pick first available column of the right type
-                fallback = next(iter(categorical), next(iter(numeric), next(iter(available), kpi["column"])))
+                fallback = next(iter(numeric), next(iter(available), kpi["column"]))
                 logger.warning(f"Auto-fixing KPI column '{kpi['column']}' → '{fallback}'")
                 kpi["column"] = fallback
+            # Clear filter_column if it doesn't exist in the dataset
+            if kpi.get("filter_column") and kpi["filter_column"] not in available:
+                logger.warning(f"Clearing invalid KPI filter_column '{kpi['filter_column']}'")
+                kpi["filter_column"] = None
+                kpi["filter_value"] = None
 
         for chart in spec_dict["charts"]:
             if chart["x"] not in available:
@@ -144,6 +148,25 @@ _CHART_TYPE_ALIASES = {
 _VALID_CHART_TYPES = {"line", "bar", "donut", "scatter", "heatmap"}
 _VALID_AGGREGATIONS = {"count", "sum", "mean", "max", "min"}
 
+_VALID_INSIGHT_TYPES = {"trend", "comparison", "anomaly", "recommendation", "summary"}
+_INSIGHT_TYPE_ALIASES = {
+    "correlation": "comparison",
+    "ranking": "comparison",
+    "proportion": "comparison",
+    "breakdown": "comparison",
+    "distribution": "summary",
+    "overview": "summary",
+    "pattern": "trend",
+    "forecast": "trend",
+    "change": "trend",
+    "observation": "summary",
+    "finding": "summary",
+    "insight": "summary",
+    "highlight": "anomaly",
+    "outlier": "anomaly",
+    "spike": "anomaly",
+}
+
 
 def _coerce_raw_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -177,6 +200,13 @@ def _coerce_raw_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
         if agg not in _VALID_AGGREGATIONS:
             chart["aggregation"] = "count" if chart.get("y", "count") == "count" else "sum"
             logger.warning(f"Coerced aggregation '{agg}' → '{chart['aggregation']}'")
+
+    # Coerce insight hint types
+    for hint in coerced.get("insight_hints", []):
+        itype = str(hint.get("type", "")).lower()
+        if itype not in _VALID_INSIGHT_TYPES:
+            hint["type"] = _INSIGHT_TYPE_ALIASES.get(itype, "summary")
+            logger.warning(f"Coerced insight type '{itype}' → '{hint['type']}'")
 
     # Ensure required list fields exist
     coerced.setdefault("assumptions", [])

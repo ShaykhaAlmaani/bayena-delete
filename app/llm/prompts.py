@@ -42,8 +42,10 @@ Return EXACTLY this JSON structure:
       "id": "kpi_1",
       "label": "KPI Name",
       "label_ar": "Arabic KPI name",
-      "calculation": "count_rows",
+      "calculation": "sum",
       "column": "column_name",
+      "filter_column": null,
+      "filter_value": null,
       "description": "What this measures"
     }
   ],
@@ -73,6 +75,12 @@ Return EXACTLY this JSON structure:
   "clarification_needed": false,
   "clarification_question": null
 }
+
+KPI FILTER RULES:
+- If the user asks for sector-specific, category-specific, or region-specific KPIs (e.g. "Residential water consumption", "violations in Riyadh"), use filter_column + filter_value to pre-filter the data before computing.
+- Example: for "Residential Water Consumption", set filter_column="sector", filter_value="Residential", calculation="sum", column="consumption_m3"
+- For a KPI that covers ALL rows (e.g. "Total Water Consumption"), leave filter_column and filter_value as null.
+- Always include one unfiltered "Total" KPI and the remaining 2–3 as filtered breakdowns.
 
 RULES:
 - Select 1–2 datasets maximum

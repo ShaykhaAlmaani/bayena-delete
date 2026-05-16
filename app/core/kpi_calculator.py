@@ -117,6 +117,17 @@ def compute_kpi(plan: KPIPlan, df: pd.DataFrame) -> Dict[str, Any]:
     Compute a single KPI card value from a validated plan.
     Returns a dict ready for the API response and UI rendering.
     """
+    # Apply optional row filter (e.g. sector == 'Residential')
+    if plan.filter_column and plan.filter_value:
+        if plan.filter_column in df.columns:
+            df = df[df[plan.filter_column].astype(str).str.strip().str.lower()
+                    == str(plan.filter_value).strip().lower()]
+            logger.debug(f"KPI '{plan.id}': filtered to {len(df)} rows "
+                         f"where {plan.filter_column}=={plan.filter_value}")
+        else:
+            logger.warning(f"KPI '{plan.id}': filter_column '{plan.filter_column}' "
+                           f"not in DataFrame — filter ignored")
+
     calc_fn = _CALCULATION_MAP.get(plan.calculation)
     if not calc_fn:
         logger.warning(f"Unknown calculation type: {plan.calculation}")
